@@ -311,6 +311,57 @@ class RLHFDataset(Dataset):
             messages: List of messages with replaced placeholder.
         """
         messages: list = example[key]
+        # PATCH (Qwen3.5-OPD): 针对 Qwen3.5 chat_template 的 arguments hydrate.
+        # ─────────────────────────────────────────────────────────────────
+        # build_multiscene_data_qwen35.py 生成的 parquet 里,
+        #   tool_calls[*].function.arguments 存的是 JSON string (parquet 稳定, 避 pyarrow schema union bug).
+        # 但 Qwen3.5 chat_template 要求 arguments 是 dict.
+        # 这里对 extra_info.target_model == "qwen3_5" 的样本做 str → dict hydrate.
+        # 对老 7B parquet (无 target_model 字段) 完全无副作用 (str 保持 str).
+        # 顺便清理 pyarrow schema-union 塞进来的 None 值 (老 parquet 可能有).
+        import json as _json
+        import numpy as _np
+        _extra_info = example.get('extra_info', {}) or {}
+        _target_model = _extra_info.get('target_model') if hasattr(_extra_info, 'get') else None
+        def _sanitize(v):
+            if isinstance(v, dict):
+                return {k: _sanitize(vv) for k, vv in v.items() if vv is not None}
+            if isinstance(v, (list, _np.ndarray)):
+                return [_sanitize(x) for x in v]
+            return v
+        def _hydrate_qwen35(msg):
+            if not isinstance(msg, dict):
+                return msg
+            m2 = dict(msg)
+            tcs = m2.get('tool_calls')
+            if tcs is not None and hasattr(tcs, '__len__') and len(tcs) > 0:
+                new_tcs = []
+                for tc in tcs:
+                    if not hasattr(tc, 'keys'):
+                        new_tcs.append(tc)
+                        continue
+                    tc2 = dict(tc)
+                    fn = tc2.get('function')
+                    if hasattr(fn, 'keys'):
+                        fn2 = dict(fn)
+                        args = fn2.get('arguments')
+                        if isinstance(args, str):
+                            try:
+                                fn2['arguments'] = _json.loads(args)
+                            except Exception:
+                                fn2['arguments'] = {}
+                        tc2['function'] = fn2
+                    new_tcs.append(tc2)
+                m2['tool_calls'] = new_tcs
+            return m2
+        _hydrated_messages = []
+        for _m in messages:
+            _m_clean = _sanitize(_m) if isinstance(_m, dict) else _m
+            if _target_model == 'qwen3_5':
+                _m_clean = _hydrate_qwen35(_m_clean)
+            _hydrated_messages.append(_m_clean)
+        messages = _hydrated_messages
+
         # When concatenating multimodal datasets, get will return None for samples without a modality column.
         images = example.get(self.image_key, None) or []
         videos = example.get(self.video_key, None) or []

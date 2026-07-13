@@ -386,7 +386,22 @@ def compute_distillation_loss_reverse_kl_estimator(
         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
     else:
         response_mask_bool = data["response_mask"].bool()
-    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
+    # torch 2.11 fix: response_mask.to_padded_tensor pad 到 nested 自身 max ragged len,
+    # 与 log_probs 的 no_padding_2_padding(max_response_len) 基准在部分 batch 不一致.
+    # 对齐 response 维度到 student (padding 区 mask=False, 不影响 masked loss).
+    _tgt = student_log_probs.shape[1]
+    _cur = response_mask_bool.shape[1]
+    if _cur < _tgt:
+        _pad = torch.zeros(
+            (response_mask_bool.shape[0], _tgt - _cur),
+            dtype=response_mask_bool.dtype, device=response_mask_bool.device,
+        )
+        response_mask_bool = torch.cat([response_mask_bool, _pad], dim=1)
+    elif _cur > _tgt:
+        response_mask_bool = response_mask_bool[:, :_tgt]
+    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape, (
+        f"shape mismatch: teacher={teacher_log_probs.shape} student={student_log_probs.shape} mask={response_mask_bool.shape}"
+    )
 
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_losses = kl_penalty(

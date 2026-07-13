@@ -128,7 +128,19 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0]
+    # DIAG: 若不等, 输出详细信息帮助定位 (原 assert 只报无消息 AssertionError)
+    if sequence_offsets[-1].item() != values.shape[0]:
+        _diag = {
+            "sequence_offsets_last": int(sequence_offsets[-1].item()),
+            "values_shape_0": int(values.shape[0]),
+            "prompt_lens": prompt_lens.tolist() if hasattr(prompt_lens, "tolist") else prompt_lens,
+            "response_lens": response_lens.tolist() if hasattr(response_lens, "tolist") else response_lens,
+            "prompt_ids_shape": tuple(prompt_ids.shape),
+            "response_ids_shape": tuple(response_ids.shape),
+            "values_shape": tuple(values.shape),
+            "max_response_len": max_response_len,
+        }
+        raise AssertionError(f"no_padding_2_padding DIAG: {_diag}")
     assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
 
     response_list = []

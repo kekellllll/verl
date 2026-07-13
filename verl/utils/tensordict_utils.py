@@ -492,10 +492,39 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
             if isinstance(tensor, torch.Tensor) and not tensor.is_nested:
                 data_dict[key] = tensor[indices]
             elif isinstance(tensor, torch.Tensor) and tensor.is_nested:
-                tensor_lst = tensor.unbind()  # for performance
+                ragged_idx = getattr(tensor, "_ragged_idx", tensor.dim() - 1)
+                # torch 2.11 fix: tensor.unbind() 依赖 torch 内部 ragged 结构, 3D mrope position_ids
+                # 经 pickle/unpickle 后内部 ragged_idx 丢失(=1), 触发 unbind 严格 check 失败.
+                # 改用显式 ragged_idx + values/offsets 手动 split, 不依赖 torch 内部 ragged 结构.
+                if ragged_idx != 1:
+                    _cat_dim = ragged_idx - 1
+                    _lengths = tensor.offsets().diff().tolist()
+                    _sum = sum(_lengths)
+                    _val_size = tensor.values().shape[_cat_dim]
+                    if _sum == _val_size:
+                        # normal path: offsets consistent with values
+                        tensor_lst = list(torch.split(tensor.values(), _lengths, dim=_cat_dim))
+                    else:
+                        # torch 2.11 fix (2nd): offsets() corrupted by pickle/unpickle
+                        # (sum(offsets.diff())=%d vs values.shape[%d]=%d).
+                        # Fallback: try native unbind (may work when offsets is broken but internal is OK).
+                        try:
+                            tensor_lst = list(tensor.unbind())
+                        except Exception as _e:
+                            # Last resort: single-item split at values dim (single-sample batch)
+                            if len(_lengths) == 1:
+                                tensor_lst = [tensor.values()]
+                            else:
+                                raise RuntimeError(
+                                    f'nested tensor offsets corrupt: sum(diff)={_sum}, '
+                                    f'values.shape[{_cat_dim}]={_val_size}, ragged_idx={ragged_idx}, '
+                                    f'unbind_err={_e}'
+                                ) from _e
+                else:
+                    tensor_lst = tensor.unbind()  # for performance
                 selected_tensors = [tensor_lst[idx] for idx in indices]
                 data_dict[key] = nested_tensor_from_tensor_list(
-                    selected_tensors, ragged_idx=getattr(tensor, "_ragged_idx", tensor.dim() - 1)
+                    selected_tensors, ragged_idx=ragged_idx
                 )
             else:
                 # This handles NonTensorStack (indexable by batch dim) and NonTensorData (scalar metadata).

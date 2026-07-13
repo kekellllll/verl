@@ -909,6 +909,16 @@ class AgentLoopWorker:
         if self.processor is None or not hasattr(self.processor, "get_rope_index"):
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
+        # [thesiswang patch 2026-07-13] Qwen3.5-35B-A3B is a VL model but we train text-only.
+        # If no real image/video grid_thw is provided, avoid calling get_rope_index (which
+        # incorrectly treats input_ids containing image_pad/video_pad special tokens as
+        # multimodal and does next(None) -> TypeError). Fall back to text-only rope.
+        if (
+            multi_modal_inputs.get("image_grid_thw") is None
+            and multi_modal_inputs.get("video_grid_thw") is None
+        ):
+            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
+
         multi_modal_kwargs = {
             "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
             "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
