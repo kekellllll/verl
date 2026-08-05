@@ -59,9 +59,13 @@ import torch
 from tensordict import TensorDict
 
 from verl.trainer.distillation.losses import (
+    align_response_mask,
+    compute_distillation_loss_range,
     compute_distillation_loss_reverse_kl_estimator,
 )
-from verl.workers.config import DistillationConfig, DistillationLossConfig
+from verl.utils import tensordict_utils as tu
+from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
+from verl.workers.utils.losses import update_global_batch_info
 
 
 # --------------------------------------------------------------------------
@@ -273,3 +277,54 @@ def test_reverse_kl_truncate_longer_masked_metric_stable():
         f"masked abs_loss changed with truncation: "
         f"base={abs_base}  truncate={abs_tr}"
     )
+
+
+def test_outer_loss_range_reuses_aligned_response_mask():
+    """Outer metrics must accept the same short nested mask as the estimator."""
+    losses = torch.arange(14, dtype=torch.float32).reshape(2, 7)
+    response_mask = torch.nested.nested_tensor(
+        [torch.tensor([1, 1, 0, 0]), torch.tensor([1, 0, 0, 0])],
+        layout=torch.jagged,
+    )
+
+    aligned = align_response_mask(response_mask, losses)
+    metrics = compute_distillation_loss_range(losses, response_mask)
+
+    assert aligned.shape == losses.shape
+    assert aligned.dtype == torch.bool
+    assert not aligned[:, 4:].any()
+    assert float(metrics["distillation/loss_min"].aggregate()) == 0.0
+    assert float(metrics["distillation/loss_max"].aggregate()) == 7.0
+
+
+def test_align_response_mask_rejects_truncating_valid_tokens():
+    losses = torch.zeros(1, 3)
+    response_mask = torch.tensor([[1, 1, 1, 1]], dtype=torch.bool)
+
+    with pytest.raises(ValueError, match="valid tokens beyond"):
+        align_response_mask(response_mask, losses)
+
+
+def test_global_batch_info_is_refreshed_from_current_micro_batch():
+    """Distillation must not inherit normalization metadata from a previous micro-batch."""
+    config = ActorConfig(strategy="fsdp", rollout_n=1, use_dynamic_bsz=True)
+    config.global_batch_info["stale"] = 1
+    data = TensorDict({}, batch_size=[])
+    tu.assign_non_tensor(
+        data,
+        dp_size=4,
+        batch_num_tokens=123,
+        global_batch_size=16,
+    )
+
+    info = update_global_batch_info(config, data)
+    unwrapped = {key: tu.unwrap_non_tensor_data(value) for key, value in info.items()}
+
+    assert unwrapped == {
+        "dp_size": 4,
+        "batch_num_tokens": 123,
+        "global_batch_size": 16,
+        "loss_scale_factor": None,
+    }
+    assert config.global_batch_info == info
+    assert "stale" not in config.global_batch_info
