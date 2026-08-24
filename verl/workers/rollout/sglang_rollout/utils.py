@@ -21,9 +21,40 @@ import torch
 import torch.distributed as dist
 
 from verl.utils.device import get_device_name
-from verl.workers.rollout.utils import ensure_async_iterator
+from verl.workers.rollout.utils import ensure_async_iterator, get_vision_placeholder_token_ids
 
 SGLANG_LORA_NAME = "verl_actor_lora_name"
+
+
+def get_vision_placeholder_sampling_controls(processor) -> tuple[str | None, list[int]]:
+    """Build SGLang controls that prevent sampling ungrounded vision placeholders."""
+    token_ids = get_vision_placeholder_token_ids(processor)
+    if not token_ids:
+        return None, []
+
+    from sglang.srt.sampling.custom_logit_processor import DisallowedTokensLogitsProcessor
+
+    return DisallowedTokensLogitsProcessor.to_str(), token_ids
+
+
+def add_vision_placeholder_sampling_controls(
+    request: dict,
+    logit_processor: str | None,
+    token_ids: list[int],
+) -> dict:
+    """Attach SGLang's disallowed-token processor to one generation request."""
+    if logit_processor is None or not token_ids:
+        return request
+
+    request = dict(request)
+    sampling_params = dict(request["sampling_params"])
+    custom_params = dict(sampling_params.get("custom_params") or {})
+    existing_token_ids = list(custom_params.get("token_ids") or [])
+    custom_params["token_ids"] = list(dict.fromkeys([*existing_token_ids, *token_ids]))
+    sampling_params["custom_params"] = custom_params
+    request["sampling_params"] = sampling_params
+    request["custom_logit_processor"] = logit_processor
+    return request
 
 
 def normalize_peft_config_for_sglang(peft_config: dict) -> dict:

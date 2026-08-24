@@ -58,6 +58,8 @@ from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutpu
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
+    add_vision_placeholder_sampling_controls,
+    get_vision_placeholder_sampling_controls,
     lora_rank_of,
     lora_served_as_adapter,
     sglang_lora_target_modules,
@@ -163,6 +165,10 @@ class SGLangHttpServer:
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        (
+            self._vision_placeholder_logit_processor,
+            self._vision_placeholder_token_ids,
+        ) = get_vision_placeholder_sampling_controls(self.model_config.processor)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
             self.config.max_model_len = max_position_embeddings
@@ -339,6 +345,10 @@ class SGLangHttpServer:
             "custom_weight_loader": custom_weight_loader or None,
             **engine_kwargs,
         }
+        if self._vision_placeholder_logit_processor is not None:
+            # Rollout servers are cluster-internal. Enable SGLang's serialized processor
+            # support only when verl has installed its trusted built-in token blocker.
+            args["enable_custom_logit_processor"] = True
 
         # update lora-related args
         if self.lora_as_adapter:
@@ -630,6 +640,11 @@ class SGLangHttpServer:
             # TODO: support video input for sglang
             # video_data=video_data,
         }
+        request = add_vision_placeholder_sampling_controls(
+            request,
+            self._vision_placeholder_logit_processor,
+            self._vision_placeholder_token_ids,
+        )
 
         if prompt_logprobs is not None:
             request["logprob_start_len"] = 0
